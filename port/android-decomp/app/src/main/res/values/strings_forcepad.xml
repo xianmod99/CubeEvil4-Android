@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- "Force controller detection" (Button Mapping page): English; other languages fall back to it -->
+    <string name="ingame_force_pad" tools:ignore="MissingTranslation">Force controller detection</string>
+    <string name="ingame_force_pad_help" tools:ignore="MissingTranslation">Use this if your gamepad is not detected (or Android lists it as a keyboard): every key of an external device then counts as a controller button, and you can assign it above by tapping an action and pressing the button.</string>
+</resources>
