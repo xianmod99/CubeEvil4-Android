@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="ingame_force_pad" tools:ignore="MissingTranslation">Paksa deteksi controller</string>
+    <string name="ingame_force_pad_help" tools:ignore="MissingTranslation">Pakai ini kalau gamepad tidak terdeteksi (atau dibaca Android sebagai keyboard): semua tombol dari perangkat eksternal dianggap tombol controller, lalu atur di atas dengan mengetuk sebuah aksi dan menekan tombolnya.</string>
+</resources>
