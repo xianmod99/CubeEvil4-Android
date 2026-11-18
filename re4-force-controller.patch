@@ -1,0 +1,214 @@
+diff --git a/.github/workflows/build-apk.yml b/.github/workflows/build-apk.yml
+new file mode 100644
+index 0000000..10c38b6
+--- /dev/null
++++ b/.github/workflows/build-apk.yml
+@@ -0,0 +1,73 @@
++name: Build CubeEvil4 APK (patched)
++
++on:
++  workflow_dispatch:
++  push:
++    branches: [ main, master ]
++    paths-ignore: [ '**/*.md' ]
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    timeout-minutes: 40
++    env:
++      # Library native (game core) diambil dari APK rilis resmi yang SAMA versinya dengan source (0.99.18-rc).
++      # Kalau nanti ganti versi, ubah dua baris ini.
++      RELEASE_TAG: 0.99.18-rc
++      RELEASE_APK: CubeEvil4-0.99.18-Android.apk
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          sparse-checkout: port/android-decomp
++
++      - uses: actions/setup-java@v4
++        with:
++          distribution: temurin
++          java-version: 17
++
++      - name: Android SDK
++        uses: android-actions/setup-android@v3
++        with:
++          packages: "platforms;android-35 build-tools;35.0.0"
++
++      - name: Ambil library native dari APK resmi
++        run: |
++          curl -fL --retry 3 -o official.apk \
++            "https://github.com/Andiweli/CubeEvil4-Android/releases/download/${RELEASE_TAG}/${RELEASE_APK}"
++          mkdir -p official
++          unzip -q official.apk 'lib/*' -d official
++          dest=port/android-decomp/app/src/core/jniLibs
++          mkdir -p "$dest"
++          cp -r official/lib/* "$dest"/
++          find "$dest" -name '*.so' | wc -l
++          ls "$dest"
++
++      - name: Matikan build native (pakai .so resmi)
++        run: |
++          python3 - <<'PY'
++          import re
++          p = 'port/android-decomp/app/build.gradle'
++          s = open(p).read()
++          s = re.sub(r"externalNativeBuild\s*\{\s*cmake\s*\{[^{}]*\}\s*\}", "", s)
++          s = re.sub(r"^\s*ndkVersion\s+'[^']*'\s*$", "", s, flags=re.M)
++          open(p, 'w').write(s)
++          PY
++          grep -n "ndkVersion\|cmake" port/android-decomp/app/build.gradle || true
++
++      # keystore debug disimpan di cache supaya tanda tangan APK sama tiap build (bisa update tanpa uninstall)
++      - name: Keystore
++        uses: actions/cache@v4
++        with:
++          path: ~/.android/debug.keystore
++          key: re4-debug-keystore-v1
++
++      - name: Build
++        working-directory: port/android-decomp
++        run: |
++          chmod +x gradlew
++          ./gradlew :app:assembleCoreDebug --no-daemon --stacktrace
++
++      - uses: actions/upload-artifact@v4
++        with:
++          name: CubeEvil4-patched-apk
++          path: port/android-decomp/app/build/outputs/apk/core/debug/*.apk
+diff --git a/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreActivity.java b/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreActivity.java
+index 88ee701..e543344 100644
+--- a/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreActivity.java
++++ b/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreActivity.java
+@@ -89,6 +89,13 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+   static final String TAG = "RE4Input";
+   /** Preferences of the core mode's controller (MainActivity sets the swap). */
+   static final String INPUT_PREFS = "core_input", SWAP_FACE = "swapFace", R3_CAPTURE = "r3Capture";
++  /**
++   * "Force controller detection" (Button Mapping page): every key of an external device counts as a controller's,
++   * also those of a pad that Android lists as a keyboard (letters, no stick), so that its buttons reach the
++   * game and the button mapping. Off by default: a real keyboard then keeps its own mapping.
++   */
++  static final String FORCE_PAD = "forceController";
++  static volatile boolean forceController;
+   /** The menu's setting "Touch Controls": TouchShowRule.AUTO (the default), FORCE or SUPPRESS. */
+   static final String TOUCH_MODE = "touchMode";
+   /** Until 21.10.2026 the switch "Use Touch Controls" (true: shown even with a controller, now FORCE). */
+@@ -345,6 +352,7 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+     SharedPreferences inputPrefs = getSharedPreferences(INPUT_PREFS, MODE_PRIVATE);
+     input.setSwapFace(inputPrefs.getBoolean(SWAP_FACE, false));
+     input.setAlternate(inputPrefs.getBoolean(ALT_CONTROLS, false));
++    forceController = inputPrefs.getBoolean(FORCE_PAD, false);
+     if (inputPrefs.contains(OLD_KEY_MAP)) {
+       Log.i(TAG, "layout: the free keys of the controller configuration (" + inputPrefs.getString(OLD_KEY_MAP, "")
+           + ") dropped; the button mapping starts from the default");
+@@ -1186,6 +1194,16 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+       logLayout();
+     }
+ 
++    @Override public boolean forcePadOn() { return forceController; }
++
++    @Override public void forcePadChanged(boolean on) {
++      getSharedPreferences(INPUT_PREFS, MODE_PRIVATE).edit().putBoolean(FORCE_PAD, on).apply();
++      forceController = on;
++      input.clear();  // keys held under the old rule must not stay pressed
++      send();
++      Log.i(TAG, "controller detection: " + (on ? "forced (every external key is a controller's)" : "automatic"));
++    }
++
+     @Override public void mappingChanged(ActionMap map) {
+       String text = map.encode();
+       String key = map.kind == ActionMap.KIND_KEYBOARD ? BINDINGS_KEYBOARD : BINDINGS_CONTROLLER;
+@@ -1976,6 +1994,7 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+   }
+ 
+   private static boolean controller(android.view.InputEvent e) {
++    if (forceController && forcedKey(e)) return true;
+     // a keyboard's events carry the D-pad's source too when it has arrow keys (keyboardDevice)
+     if (keyboardDevice(e.getDevice())) return false;
+     return (e.getSource() & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
+@@ -1983,6 +2002,22 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+         || (e.getSource() & InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD;
+   }
+ 
++  /** With "Force controller detection": a key of an external device, other than the phone's own system keys. */
++  static boolean forcedKey(android.view.InputEvent e) {
++    if (!(e instanceof KeyEvent)) return false;
++    InputDevice d = e.getDevice();
++    if (d == null || d.isVirtual()) return false;
++    switch (((KeyEvent) e).getKeyCode()) {
++      case KeyEvent.KEYCODE_BACK: case KeyEvent.KEYCODE_HOME: case KeyEvent.KEYCODE_POWER:
++      case KeyEvent.KEYCODE_VOLUME_UP: case KeyEvent.KEYCODE_VOLUME_DOWN: case KeyEvent.KEYCODE_VOLUME_MUTE:
++      case KeyEvent.KEYCODE_APP_SWITCH: case KeyEvent.KEYCODE_MENU: case KeyEvent.KEYCODE_CAMERA:
++      case KeyEvent.KEYCODE_SLEEP: case KeyEvent.KEYCODE_WAKEUP: case KeyEvent.KEYCODE_ASSIST:
++        return false;
++      default:
++        return true;
++    }
++  }
++
+   /**
+    * The touch controls' B pressed while the benchmark runs: it ends it as a controller's B does (0.99.17, users could
+    * not end it by touch: the touch B went to the game as its button only, never to the benchmark's keys).
+@@ -2067,6 +2102,7 @@ public final class CoreActivity extends Activity implements InputManager.InputDe
+    * those without letters stay controllers.
+    */
+   static boolean keyboardSources(int s, int keyboardType) {
++    if (forceController) return false;
+     if ((s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) return false;
+     return (s & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
+         && keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC;
+diff --git a/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreMenu.java b/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreMenu.java
+index 01ad093..0f9d392 100644
+--- a/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreMenu.java
++++ b/port/android-decomp/app/src/main/java/com/ast/re4decomp/CoreMenu.java
+@@ -80,6 +80,10 @@ final class CoreMenu extends Dialog {
+     void mappingChanged(ActionMap map);
+     /** The button mapping in use for ActionMap.KIND_CONTROLLER or KIND_KEYBOARD. */
+     ActionMap mapping(int kind);
++    /** "Force controller detection" is on (every key of an external device is a controller's). */
++    default boolean forcePadOn() { return false; }
++    /** "Force controller detection" switched: stored and applied at once. */
++    default void forcePadChanged(boolean on) {}
+     /** A controller's key as its label (CoreInput.faceLabel: "swap A/B and X/Y"). */
+     int faceLabel(int keyCode);
+     /** A physical game controller is connected (the button mapping can be used). */
+@@ -1306,6 +1310,14 @@ final class CoreMenu extends Dialog {
+         });
+     if (!keyboard && input.getBoolean(CoreActivity.ALT_CONTROLS, false)) help(R.string.ingame_controller_alternate_note);
+     help(keyboard ? R.string.ingame_map_fixed_keyboard : R.string.ingame_map_fixed_controller);
++    // a pad that is not found (it shows up as a keyboard, or with odd keys): every external key counts as a controller's
++    if (host != null) {
++      MenuLayout.Buttons forceRow = buttonsRow(body);
++      toggle(forceRow, R.string.ingame_force_pad, host.forcePadOn(), on -> {
++        host.forcePadChanged(on); showPage(CONTROLLER, false);
++      });
++      help(R.string.ingame_force_pad_help);
++    }
+     if (keyboard) mouseSlider();
+     ActionMap def = ActionMap.defaults(mapKind), m = host == null ? null : host.mapping(mapKind);
+     if (m == null) m = def;
+diff --git a/port/android-decomp/app/src/main/res/values-in/strings_forcepad.xml b/port/android-decomp/app/src/main/res/values-in/strings_forcepad.xml
+new file mode 100644
+index 0000000..bf79c79
+--- /dev/null
++++ b/port/android-decomp/app/src/main/res/values-in/strings_forcepad.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources xmlns:tools="http://schemas.android.com/tools">
++    <string name="ingame_force_pad" tools:ignore="MissingTranslation">Paksa deteksi controller</string>
++    <string name="ingame_force_pad_help" tools:ignore="MissingTranslation">Pakai ini kalau gamepad tidak terdeteksi (atau dibaca Android sebagai keyboard): semua tombol dari perangkat eksternal dianggap tombol controller, lalu atur di atas dengan mengetuk sebuah aksi dan menekan tombolnya.</string>
++</resources>
+diff --git a/port/android-decomp/app/src/main/res/values/strings_forcepad.xml b/port/android-decomp/app/src/main/res/values/strings_forcepad.xml
+new file mode 100644
+index 0000000..5d64344
+--- /dev/null
++++ b/port/android-decomp/app/src/main/res/values/strings_forcepad.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources xmlns:tools="http://schemas.android.com/tools">
++    <!-- "Force controller detection" (Button Mapping page): English; other languages fall back to it -->
++    <string name="ingame_force_pad" tools:ignore="MissingTranslation">Force controller detection</string>
++    <string name="ingame_force_pad_help" tools:ignore="MissingTranslation">Use this if your gamepad is not detected (or Android lists it as a keyboard): every key of an external device then counts as a controller button, and you can assign it above by tapping an action and pressing the button.</string>
++</resources>
