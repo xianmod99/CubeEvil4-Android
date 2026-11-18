@@ -1,0 +1,73 @@
+name: Build CubeEvil4 APK (patched)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths-ignore: [ '**/*.md' ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # Library native (game core) diambil dari APK rilis resmi yang SAMA versinya dengan source (0.99.18-rc).
+      # Kalau nanti ganti versi, ubah dua baris ini.
+      RELEASE_TAG: 0.99.18-rc
+      RELEASE_APK: CubeEvil4-0.99.18-Android.apk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: port/android-decomp
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0"
+
+      - name: Ambil library native dari APK resmi
+        run: |
+          curl -fL --retry 3 -o official.apk \
+            "https://github.com/Andiweli/CubeEvil4-Android/releases/download/${RELEASE_TAG}/${RELEASE_APK}"
+          mkdir -p official
+          unzip -q official.apk 'lib/*' -d official
+          dest=port/android-decomp/app/src/core/jniLibs
+          mkdir -p "$dest"
+          cp -r official/lib/* "$dest"/
+          find "$dest" -name '*.so' | wc -l
+          ls "$dest"
+
+      - name: Matikan build native (pakai .so resmi)
+        run: |
+          python3 - <<'PY'
+          import re
+          p = 'port/android-decomp/app/build.gradle'
+          s = open(p).read()
+          s = re.sub(r"externalNativeBuild\s*\{\s*cmake\s*\{[^{}]*\}\s*\}", "", s)
+          s = re.sub(r"^\s*ndkVersion\s+'[^']*'\s*$", "", s, flags=re.M)
+          open(p, 'w').write(s)
+          PY
+          grep -n "ndkVersion\|cmake" port/android-decomp/app/build.gradle || true
+
+      # keystore debug disimpan di cache supaya tanda tangan APK sama tiap build (bisa update tanpa uninstall)
+      - name: Keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: re4-debug-keystore-v1
+
+      - name: Build
+        working-directory: port/android-decomp
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleCoreDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CubeEvil4-patched-apk
+          path: port/android-decomp/app/build/outputs/apk/core/debug/*.apk
